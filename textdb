@@ -1,0 +1,434 @@
+#!/bin/bash
+
+# Generic purpose lightweight DB stored in one text file
+# written by Ultra Bithalver in 2014 April
+
+# Exact usage and textdb format could be found running this script with 'help' and 'helpformat' parameters
+
+# Input parameters are, in this order:
+# - operation: see help for valid operations
+# - input query string in the format "fieldname=value"
+# - output field / query
+
+# Other input conditions:
+# - env var TEXTDB should be set to the file containing the database
+
+
+# output is:
+# the value for output field from the line specified by querystring
+
+# Even if more lines could pass the query string only the first found will be used !
+#    This is true for read and write operation.
+
+
+# Rules for db files:
+#   Totally empty lines and lines starting with # are comment and ignored, all other lines are valuable
+#   First noncomment line is the header containing field names which are case insensitive
+#   All other noncomment lines are data which IS case sensitive
+#   Field separator is ;
+#   In the field names and data there are some forbidden characters: ';' and '#' 
+
+
+OPERATION="$1"
+PAR2="$2"
+PAR3="$3"
+NUMBEROFPARAMS=$#
+
+function print_help {
+  echo "
+TEXTDB, lightweight DB stored in a single text file
+written by bithalver
+
+Possible runs:
+
+$0 help
+  this help
+
+$0 read FIELD1=VALUE1 FIELD2
+  returns the value of FIELD2 where FIELD1 is VALUE1.
+Example:
+$0 read country=Hungary capital
+  outputs the capital of Hungary
+
+$0 printall FIELD
+  return all possible values for FIELD
+Example:
+$0 printall country
+  outputs all possible value for the field country
+
+$0 write FIELD1=VALUE2 FIELD2=VALUE2
+  modifies the value to VALUE2 for FIELD2 in the record where FIELD1 is VALUE1
+Example:
+$0 write country=Hungary capital=Budapest
+  sets the capital of Hungary to Budapest
+  be sure you have write rights for the DB file 
+
+$0 fieldnames
+  returns all field names
+
+$0 fullrecord field=value
+  returns all the field names and values for the specific record
+
+$0 helpformat
+  prints the format for the DB file
+
+If wrong field name is given, all possible field names will be the output.
+
+If VALUE1 is not found for FIELD1, you got some error.
+
+" >&2
+  exit 1
+}
+
+function print_helpformat {
+  echo "
+Rules for the db file:
+
+  - Normal unix text file (LF line endings) 
+  - Totally empty lines and lines starting with # on the first coloumn are comment lines, 
+      they could appear anywhere in the file (they are filtered out)
+  - First noncomment line is the header containing field names which are case insensitive
+    - Field names could contain only letters, numbers and underscore [a-zA-Z0-9_]
+  - All other noncomment lines are data with strict format:
+    - Field separator is a semicolon ';'
+    - Field data should not contain semicolon ';' and number sign '#'
+    - Maximum 254 fields could possibly exist
+        because 255 is a kind of an internal error code
+
+Example DB file content:
+
+--- [START of file] ---
+
+# comment line after an empty line
+# next line is the first valuable line so it is the case insensitive header:
+country;capital
+Hungary;Budapest
+# previous line is the first data line
+# comment line followed by an empty line, both are ignored
+
+# following lines are case sensitive data 
+Germany;Berlin
+United Kingdom;London
+
+# some empty line and comment, ignored
+--- [END of file] ---
+
+" >&2
+exit 1
+}
+
+function field_position {
+  local FIELDNAME=$1
+  local tmp=$2[@]
+  local FIELDARRAY=(${!tmp})
+
+  POSITION=255
+  for (( i = 0 ; i < ${#FIELDARRAY[@]} ; i++ )) ; do
+    if [ "${FIELDARRAY[$i]}" == "$FIELDNAME" ] ; then POSITION=$i ; fi
+  done
+
+  if test $POSITION -eq 255 ; then
+    echo "Field name '$FIELDNAME' is not known." >&2
+    echo "Known field names are: "${FIELDARRAY[@]} >&2
+    exit 1
+  fi
+
+  return $POSITION
+}
+
+function textdb_fieldnames {
+  FIELDNAMES_STRING=`cat $TEXTDB | grep -vE '^$|^#' | head -1 | tr '[:upper:]' '[:lower:]'`
+  declare -a FIELDNAMES=(`echo "$FIELDNAMES_STRING" | tr ';' ' '`)
+  echo ${FIELDNAMES[@]}
+  exit 0
+}
+
+function textdb_printall {
+  if test $NUMBEROFPARAMS -ne 2 ; then
+    echo printall operation needs 1 parameter, see help: >&2
+    print_help
+  fi
+
+  local INPUTFIELD=`echo $PAR2 | tr '[:upper:]' '[:lower:]'`
+
+  FIELDNAMES_STRING=`cat $TEXTDB | grep -vE '^$|^#' | head -1 | tr '[:upper:]' '[:lower:]'`
+  declare -a FIELDNAMES=(`echo "$FIELDNAMES_STRING" | tr ';' ' '`)
+
+  field_position $INPUTFIELD FIELDNAMES ; IPOSITION=$?
+
+  if [ $IPOSITION -eq 255 ] ; then
+    echo "Input field name '$INPUTFIELD' is not known." >&2
+    echo "Known field names are: " ${FIELDNAMES[@]} >&2
+    print_help
+  fi
+
+  cat $TEXTDB | grep -vE '^$|^#' | tail -n +2 | while read PVL ; do
+
+    PVL=`echo $PVL | tr ' ' '#'` 
+    declare -a PVLA=(`echo "$PVL" | tr ';' ' '`)
+    echo ${PVLA[$IPOSITION]} | tr '#' ' '
+
+    unset PVLA
+  done
+}
+
+
+function inputstring_check {
+
+  local I="$1"
+
+  if ! echo "$I" | grep -qE '^[a-zA-Z_0-9]+=[^'${INVALID_LETTERS}']+$' ; then
+    echo "
+String format '$I' is wrong; it should be field=value 
+While field name is case insensitive, value is case sensitive
+Field names can contain only letters, numbers and underscore
+Field value can contain any character _except_ '${INVALID_LETTERS}'
+" >&2
+    exit 1
+  fi
+}
+
+function textdb_read {
+
+  if test $NUMBEROFPARAMS -ne 3 ; then
+    echo read operation needs 2 parameters, see help: >&2
+    print_help
+  fi
+
+  local INPUTSTRING=$PAR2
+  local OUTPUTFIELD=`echo $PAR3| tr '[:upper:]' '[:lower:]'`
+
+  inputstring_check "$INPUTSTRING"
+
+  INPUTFIELD=`echo "$INPUTSTRING" | awk -F\= '{print $1}' | tr '[:upper:]' '[:lower:]'`
+  INPUTVALUE=`echo "$INPUTSTRING" | awk -F\= '{print $2}'`
+
+  FIELDNAMES_STRING=`cat $TEXTDB | grep -vE '^$|^#' | head -1 | tr '[:upper:]' '[:lower:]'`
+
+  declare -a FIELDNAMES=(`echo "$FIELDNAMES_STRING" | tr ';' ' '`)
+
+  field_position $INPUTFIELD FIELDNAMES ; IPOSITION=$?
+  field_position $OUTPUTFIELD FIELDNAMES ; OPOSITION=$?
+
+  FOUNDFILE=/tmp/textdb_found_$$ ; rm -f $FOUNDFILE
+
+  cat $TEXTDB | grep -vE '^$|^#' | grep "$INPUTVALUE" | while read PVL ; do # PVL stands for Possible Valuable Line
+
+    # PVL=`echo "$PVL" | tr ' ' '#'`
+    local L=0
+    for ((i=0 ; i<${#PVL} ; i++ )) ;do
+      local A=${PVL:i:1}
+      if test "$A" == ';' ; then
+        let L=$L+1
+        PVLA[$L]=''
+      else
+        PVLA[$L]=${PVLA[$L]}$A
+      fi
+    done
+
+    if [ $IPOSITION -gt ${#PVLA[@]} ] ; then continue ; fi # If the record does not have the input field at all, this is not our line
+
+    if [ "${PVLA[$IPOSITION]}" == "$INPUTVALUE" ] ; then
+      touch $FOUNDFILE
+
+      if [ $OPOSITION -le ${#PVLA[@]} ] ; then # write a value only if the line have that many input fields; output is an empty string otherwise
+        echo ${PVLA[$OPOSITION]} >$FOUNDFILE
+      fi
+      break
+    fi
+    unset PVLA
+  done
+
+  if test -f $FOUNDFILE ; then
+    cat $FOUNDFILE
+    rm $FOUNDFILE
+    exit 0
+  else
+    echo "For the field '$INPUTFIELD' the value '$INPUTVALUE' does not exist." >&2
+    exit 1
+  fi
+}
+
+function textdb_write {
+  if ! test -w $TEXTDB ; then
+    echo "The file $TEXTDB must be writeable for this operation." >&2
+    exit 1
+  fi
+
+  if test $NUMBEROFPARAMS -ne 3 ; then
+    echo write operation needs 2 parameters, see help: >&2
+    print_help
+  fi
+
+  local INPUTSTRING=$PAR2
+  local OUTPUTSTRING=$PAR3
+ 
+  inputstring_check "$INPUTSTRING"
+  inputstring_check "$OUTPUTSTRING"
+
+  INPUTFIELD=`echo "$INPUTSTRING" | awk -F\= '{print $1}' | tr '[:upper:]' '[:lower:]'`
+  INPUTVALUE=`echo "$INPUTSTRING" | awk -F\= '{print $2}'`
+ 
+  OUTPUTFIELD=`echo "$OUTPUTSTRING" | awk -F\= '{print $1}' | tr '[:upper:]' '[:lower:]'`
+  OUTPUTVALUE=`echo "$OUTPUTSTRING" | awk -F\= '{print $2}'`
+ 
+  FIELDNAMES_STRING=`cat $TEXTDB | grep -vE '^$|^#' | head -1 | tr '[:upper:]' '[:lower:]'`
+ 
+  declare -a FIELDNAMES=(`echo "$FIELDNAMES_STRING" | tr ';' ' '`)
+ 
+  field_position $INPUTFIELD FIELDNAMES ; IPOSITION=$?
+  field_position $OUTPUTFIELD FIELDNAMES ; OPOSITION=$?
+
+
+  TMPFILE=/tmp/textdb_write_$$ ; rm -f $TMPFILE
+  TMPFILEA=/tmp/textdb_ALREADY_FOUND_$$ ; echo "ALREADY_FOUND=0" >$TMPFILEA
+  ALREADY_FOUND=0
+  cat $TEXTDB | while read PVL ; do # PVL stands for Possible Valuable Line
+
+    if echo "$PVL" | grep -E '^$|^#' >>$TMPFILE ; then continue ; fi # Do not modify comment and empty lines
+    if test $ALREADY_FOUND -eq 1 ; then echo $PVL >>$TMPFILE  ;continue ; fi # If we have already found the valuable line, just print the rest
+
+    local L=0
+    for ((i=0 ; i<${#PVL} ; i++ )) ;do
+      local A=${PVL:i:1}
+      if test "$A" == ';' ; then
+        let L=$L+1
+        PVLA[$L]=''
+      else
+        PVLA[$L]=${PVLA[$L]}$A
+      fi
+    done 
+
+    if [ $IPOSITION -gt ${#PVLA[@]} ] ; then echo $PVL >>$TMPFILE  ; continue ; fi # If the record does not have the input field at all, this is not our line
+
+    if [ "${PVLA[$IPOSITION]}" == "$INPUTVALUE" ] ; then
+      # here comes the change in the line
+      # the array is modified and the writed to TMPFILE
+      ALREADY_FOUND=1 ; echo "ALREADY_FOUND=1" >$TMPFILEA
+
+      if [ $OPOSITION -gt ${#PVLA[@]} ] ; then # if the line does not have enough elements, lets add empty ones
+        OLDLENGTH=${#PVLA[@]}
+        for (( i = $OLDLENGTH ; i < $OPOSITION ; i++ )) ; do
+          PVLA[$i]=''
+        done
+      fi
+      PVLA[$OPOSITION]=$OUTPUTVALUE
+
+      for (( i=0 ; i < ${#PVLA[@]} - 1 ; i++ )) ; do
+        echo -n "${PVLA[$i]}"\; >>$TMPFILE
+      done
+      echo "${PVLA[${#PVLA[@]} - 1 ]}" >>$TMPFILE
+    else
+      echo $PVL >>$TMPFILE
+    fi
+    unset PVLA
+  done
+  . $TMPFILEA ; rm -rf $TMPFILEA
+
+  if test $ALREADY_FOUND -eq 0 ; then
+    echo Adding new element >&2
+    for (( i=0 ; i<${#FIELDNAMES} ; i++ )) ; do
+      if test $i -eq $IPOSITION ; then
+        PVLA[$i]=$INPUTVALUE
+      elif test $i -eq $OPOSITION ; then
+        PVLA[$i]=$OUTPUTVALUE
+      else
+        PVLA[$i]=''
+      fi
+      echo -n ${PVLA[$i]} >>$TMPFILE
+      let L=${#FIELDNAMES}-1 ; if test $i -eq $L ; then echo >>$TMPFILE ; else echo -n ';' >>$TMPFILE ; fi
+    done
+  fi
+
+  # diff $TEXTDB $TMPFILE >&2
+
+  cp $TMPFILE $TEXTDB ; rm $TMPFILE
+}
+
+function textdb_fullrecord {
+  if test $NUMBEROFPARAMS -ne 2 ; then
+    echo fullrecord operation needs 1 parameters, see help: >&2
+    print_help
+  fi
+ 
+  local INPUTSTRING=$PAR2
+
+  inputstring_check "$INPUTSTRING"
+
+  INPUTFIELD=`echo "$INPUTSTRING" | awk -F\= '{print $1}' | tr '[:upper:]' '[:lower:]'`
+  INPUTVALUE=`echo "$INPUTSTRING" | awk -F\= '{print $2}'`
+
+  FIELDNAMES_STRING=`cat $TEXTDB | grep -vE '^$|^#' | head -1 | tr '[:upper:]' '[:lower:]'`
+
+  declare -a FIELDNAMES=(`echo "$FIELDNAMES_STRING" | tr ';' ' '`)
+
+  field_position $INPUTFIELD FIELDNAMES ; IPOSITION=$?
+
+  FOUNDFILE=/tmp/textdb_found_$$ ; rm -f $FOUNDFILE
+ 
+  cat $TEXTDB | grep -vE '^$|^#' | grep "$INPUTVALUE" | while read PVL ; do # PVL stands for Possible Valuable Line
+
+    local L=0
+    for ((i=0 ; i<${#PVL} ; i++ )) ;do
+      local A=${PVL:i:1}
+      if test "$A" == ';' ; then
+        let L=$L+1
+        PVLA[$L]=''
+      else
+        PVLA[$L]=${PVLA[$L]}$A
+      fi
+    done
+
+    if [ $IPOSITION -gt ${#PVLA[@]} ] ; then continue ; fi # If the record does not have the input field at all, this is not our line
+
+    if [ "${PVLA[$IPOSITION]}" == "$INPUTVALUE" ] ; then
+      touch $FOUNDFILE
+
+      for (( i=0 ; i<${#FIELDNAMES[@]} ; i++ )) ; do
+        if test "${PVLA[$i]}" != '' ; then
+          echo ${FIELDNAMES[$i]}'='${PVLA[$i]}
+        fi
+      done
+
+      break
+    fi
+    unset PVLA
+  done
+
+  if test -f $FOUNDFILE ; then
+    rm $FOUNDFILE
+    exit 0
+  else
+    echo "For the field '$INPUTFIELD' the value '$INPUTVALUE' does not exist." >&2
+    exit 1
+  fi
+
+}
+
+# Real running starts here
+
+if test -z $TEXTDB ; then
+  echo 'TEXTDB environment variable is not set; please set it to your db file before running this script.' >&2
+  exit 1
+fi
+
+if ! test -e $TEXTDB ; then 
+  echo $TEXTDB DB file does not exist, please set up the environment variable TEXTDB properly. >&2
+  exit 1
+fi
+
+
+# Which letters can not be in a field value
+export INVALID_LETTERS=';#'
+
+case $OPERATION in 
+  read) textdb_read;;
+  write) textdb_write;;
+  printall) textdb_printall;;
+  fieldnames) textdb_fieldnames;;
+  fullrecord) textdb_fullrecord;;
+  help) print_help;;
+  helpformat) print_helpformat;;
+  *) echo 'Only allowed operations are "read" "write" "printall" "fieldnames" "fullrecord" "help" "helpformat"'>&2 ; print_help  ;;
+esac
+
